@@ -282,6 +282,15 @@ static void zb_action_handler(ezb_zcl_core_action_callback_id_t callback_id, voi
     case EZB_ZCL_CORE_REPORT_ATTR_CB_ID:
       zb_report_attribute_handler((ezb_zcl_cmd_report_attr_message_t *) message);
       break;
+    case EZB_ZCL_CORE_IDENTIFY_EFFECT_CB_ID: {
+      // The stack only surfaces a callback for TriggerEffect (0x40), not for
+      // the plain Identify command (0x00). Hand the effect id to the main
+      // loop rather than running user automations on the Zigbee task.
+      auto *identify = (ezb_zcl_identify_effect_message_t *) message;
+      global_zigbee->identify_effect_.store(identify->in.effect_id);
+      global_zigbee->identify_pending_.store(true);
+      global_zigbee->enable_loop_soon_any_context();
+    } break;
     case EZB_ZCL_CORE_DEFAULT_RSP_CB_ID: {
       ezb_zcl_cmd_default_rsp_message_t *default_rsp = (ezb_zcl_cmd_default_rsp_message_t *) message;
       ESP_LOGD(TAG, "Received ZCL Default Response: 0x%02x", default_rsp->in.status_code);
@@ -571,6 +580,9 @@ void ZigBeeComponent::setup() {
 }
 
 void ZigBeeComponent::loop() {
+  if (this->identify_pending_.exchange(false)) {
+    this->on_identify_callback_.call(this->identify_effect_.load());
+  }
   // Process all pending events
   ZBEvent *event = this->zb_events_.pop();
   while (event != nullptr) {

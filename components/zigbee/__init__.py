@@ -60,6 +60,7 @@ from .const import (
     CONF_KEEP_ALIVE,
     CONF_MANUFACTURER,
     CONF_NUM,
+    CONF_ON_IDENTIFY,
     CONF_ON_JOIN,
     CONF_ON_REPORT,
     CONF_REPORT,
@@ -91,6 +92,9 @@ DEPENDENCIES = ["esp32"]
 
 _CALLBACK_AUTOMATIONS = (
     automation.CallbackAutomation(CONF_ON_JOIN, "add_on_join_callback", [(bool, "x")]),
+    automation.CallbackAutomation(
+        CONF_ON_IDENTIFY, "add_on_identify_callback", [(cg.uint8, "x")]
+    ),
 )
 
 comp_ids = 0
@@ -413,6 +417,7 @@ CONFIG_SCHEMA = cv.All(
                 ),
             ),
             cv.Optional(CONF_ON_JOIN): automation.validate_automation({}),
+            cv.Optional(CONF_ON_IDENTIFY): automation.validate_automation({}),
         }
     ).extend(cv.COMPONENT_SCHEMA),
     cv.require_framework_version(esp_idf=cv.Version(5, 5, 4)),

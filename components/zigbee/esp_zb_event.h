@@ -131,6 +131,13 @@ class ZBEvent {
   }
 
   void init_report_attr_data(const ezb_zcl_cmd_report_attr_message_t *message) {
+    // ZBEvents are recycled through zb_event_pool_ and release() does not
+    // clear `next`. Without resetting it here, a report carrying a single
+    // variable inherits whatever `next` the previous occupant of this pool
+    // slot left behind, and handle_report_attribute()'s
+    // `while (variables) { ... variables = variables->next; }` dereferences
+    // freed memory on the second iteration (load access fault).
+    this->event_.report_attr.variables.next = nullptr;
     this->event_.report_attr.dst_endpoint = message->in.header->dst_ep;
     this->event_.report_attr.cluster = message->in.header->cluster_id;
     this->event_.report_attr.variables.attr_id = message->in.variables->attr_id;

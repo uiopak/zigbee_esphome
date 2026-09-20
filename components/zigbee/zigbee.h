@@ -99,6 +99,10 @@ class ZigBeeComponent : public Component {
     this->on_join_callback_.add(std::forward<F>(callback));
   }
 
+  template<typename F> void add_on_identify_callback(F &&callback) {
+    this->on_identify_callback_.add(std::forward<F>(callback));
+  }
+
   bool is_started() { return this->started_; }
   bool is_connected() { return this->connected_; }
   std::atomic<bool> connected_ = false;
@@ -107,6 +111,9 @@ class ZigBeeComponent : public Component {
   std::atomic<bool> factory_new_ = false;
 
   CallbackManager<void(bool)> on_join_callback_{};
+  CallbackManager<void(uint8_t)> on_identify_callback_{};
+  std::atomic<bool> identify_pending_ = false;
+  std::atomic<uint8_t> identify_effect_ = 0;
   struct {
     std::string model;
     std::string manufacturer;
