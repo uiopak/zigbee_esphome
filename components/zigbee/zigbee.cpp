@@ -7,6 +7,10 @@
 #include "esphome/core/application.h"
 #include "esphome/core/log.h"
 #include "zigbee_helpers.h"
+#include "esphome/core/defines.h"
+#ifdef USE_ZIGBEE_TIME
+#include "time/zigbee_time.h"
+#endif
 #ifdef CONFIG_WIFI_COEX
 #include "esp_coexist.h"
 #endif
@@ -364,6 +368,16 @@ void ZigBeeComponent::handle_report_attribute(uint8_t dst_endpoint, uint16_t clu
 
 void ZigBeeComponent::handle_read_attribute_response(ezb_zcl_message_info_t info,
                                                      ezb_zcl_read_attr_rsp_variable_t *variables) {
+#ifdef USE_ZIGBEE_TIME
+  // Answer to ZigbeeTime's read of the coordinator's Time attribute.
+  if (info.cluster_id == 0x000A && variables != nullptr && variables->attr_id == 0x0000 &&
+      variables->status == EZB_ZCL_STATUS_SUCCESS && variables->attr_value != nullptr && global_time != nullptr) {
+    uint32_t utc;
+    memcpy(&utc, variables->attr_value, sizeof(utc));
+    global_time->handle_coordinator_time(utc);
+    return;
+  }
+#endif
   ESP_LOGD(TAG, "Attribute data recieved (but not yet handled):");
   while (variables) {
     ESP_LOGD(TAG, "Read attribute response: status(%d), cluster(0x%x), attribute(0x%x), type(0x%x), value(%d)",

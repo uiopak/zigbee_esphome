@@ -48,13 +48,21 @@ class ZBEvent {
         }
         break;
       case EZB_ZCL_CORE_READ_ATTR_RSP_CB_ID: {
-        ezb_zcl_read_attr_rsp_variable_t *var = &(this->event_.read_attr_resp.variables);
+        ezb_zcl_read_attr_rsp_variable_t *head = &(this->event_.read_attr_resp.variables);
+        if (head->attr_value != nullptr && head->attr_value != this->event_.read_attr_resp.inline_data) {
+          free(head->attr_value);
+        }
+        head->attr_value = nullptr;
+        // The chained nodes were allocated with new in init_read_attr_resp_data;
+        // delete them too, and clear `next` so a recycled pool slot cannot walk
+        // into them (same failure as the report path).
+        ezb_zcl_read_attr_rsp_variable_t *var = head->next;
+        head->next = nullptr;
         while (var != nullptr) {
-          if (var->attr_value != nullptr && var->attr_value != this->event_.read_attr_resp.inline_data) {
-            free(var->attr_value);
-            var->attr_value = nullptr;
-          }
-          var = var->next;
+          ezb_zcl_read_attr_rsp_variable_t *next = var->next;
+          free(var->attr_value);
+          delete var;
+          var = next;
         }
       }
         // Reset the event data
@@ -178,6 +186,10 @@ class ZBEvent {
 
   void init_read_attr_resp_data(ezb_zcl_message_info_t info, ezb_zcl_read_attr_rsp_variable_t *variables) {
     this->event_.read_attr_resp.info = info;
+    // Pool slots are reused and the event is a union, so these may hold
+    // another event type's bytes. Start from a clean single-node list.
+    this->event_.read_attr_resp.variables.next = nullptr;
+    this->event_.read_attr_resp.variables.attr_value = nullptr;
     if (variables == nullptr) {
       return;
     }
