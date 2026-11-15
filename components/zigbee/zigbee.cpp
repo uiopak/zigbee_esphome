@@ -498,8 +498,9 @@ void ZigBeeComponent::setup_reporting() {
   esp_zigbee_lock_release();
 }
 
-ZigBeeComponent::ZigBeeComponent(uint16_t keep_alive) {
-  this->keep_alive_ = keep_alive;
+ZigBeeComponent::ZigBeeComponent(uint16_t keep_alive) { this->keep_alive_ = keep_alive; }
+
+void ZigBeeComponent::setup() {
   /* initialize Zigbee stack */
   esp_zigbee_platform_config_t platform_config = {
       .storage_partition_name = ESP_ZIGBEE_STORAGE_PARTITION_NAME,
@@ -527,9 +528,6 @@ ZigBeeComponent::ZigBeeComponent(uint16_t keep_alive) {
     this->mark_failed();
     return;
   }
-}
-
-void ZigBeeComponent::setup() {
 #ifdef CONFIG_WIFI_COEX
   if (esp_coex_wifi_i154_enable() != ESP_OK) {
     this->mark_failed();
@@ -572,10 +570,8 @@ void ZigBeeComponent::setup() {
 
   ezb_nwk_set_min_join_lqi(32);
 
-#ifdef CONFIG_FREERTOS_USE_TICKLESS_IDLE
-  ESP_LOGD(TAG, "Enabling Zigbee Sleepy End Device: %s", this->sleepy_ ? "enabled" : "disabled");
+  ESP_LOGD(TAG, "Zigbee Sleepy End Device: %s", this->sleepy_ ? "enabled" : "disabled");
   ezb_nwk_set_rx_on_when_idle(!this->sleepy_);  // if sleepy, disable RX when idle to allow sleeping
-#endif
 
   uint8_t power_source = static_cast<uint8_t>(this->basic_cluster_data_.power == EZB_ZCL_BASIC_POWER_SOURCE_BATTERY
                                                   ? EZB_AF_NODE_POWER_SOURCE_RECHARGEABLE_BATTERY

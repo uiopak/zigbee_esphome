@@ -86,6 +86,16 @@ from .types import (
 from .zigbee_const import ATTR_ACCESS, ATTR_TYPE, CLUSTER_ID, CLUSTER_ROLE, DEVICE_ID
 from .zigbee_ep import create_ep
 
+try:
+    from esphome.components.esp32 import require_mbedtls_tls_extras
+except ImportError:
+
+    def require_mbedtls_tls_extras(var):
+        pass
+
+
+DOMAIN = "zigbee"
+
 _LOGGER = logging.getLogger(__name__)
 
 DEPENDENCIES = ["esp32"]
@@ -290,12 +300,6 @@ def final_validate(config):
     if config.get(CONF_SLEEPY):
         if config[CONF_ROUTER]:
             raise cv.Invalid("Zigbee Router cannot be sleepy.")
-        if "power_management" not in fv.full_config.get():
-            raise cv.Invalid("Power management is needed for sleepy Zigbee devices.")
-        pm_conf = fv.full_config.get()["power_management"]
-        pm_conf = [pm for pm in pm_conf if pm.get("platform") == "esp32_pm"][0]
-        if pm_conf.get("enable_light_sleep", False) is False:
-            raise cv.Invalid("Light sleep must be enabled for sleepy Zigbee devices.")
     global comp_ids  # noqa: PLW0603
     comp_ids = len(CORE.component_ids)
     return config
@@ -553,7 +557,7 @@ async def add_sdkconfigs(config):
 async def to_code(config):
     add_idf_component(
         name="espressif/esp-zigbee-lib",
-        ref="2.0.4",
+        ref="2.0.5",
     )
 
     add_idf_sdkconfig_option("CONFIG_ZB_ENABLED", True)
@@ -561,6 +565,10 @@ async def to_code(config):
         add_idf_sdkconfig_option("CONFIG_ZB_ZCZR", True)
     else:
         add_idf_sdkconfig_option("CONFIG_ZB_ZED", True)
+
+    # Zigbee's crypto platform uses AES-CCM.
+    # Keep the esp32 component from trimming them out of mbedTLS.
+    require_mbedtls_tls_extras({"CONFIG_MBEDTLS_CCM_C"})
 
     # add partitions for zigbee
     # add_partition("zb_storage", "data", "nvs", 0x4000)  # 16KB
