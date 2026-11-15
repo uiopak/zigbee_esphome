@@ -378,6 +378,27 @@ void ZigBeeComponent::handle_read_attribute_response(ezb_zcl_message_info_t info
     return;
   }
 #endif
+  // An answer to a read this device sent from one of its CLIENT clusters is
+  // the same information as a report of that attribute, so deliver it through
+  // the same on_report triggers. The response is addressed to the endpoint
+  // that asked, which is how the caller tells whose answer it is: the SDK does
+  // not hand the sender's address to this callback, so src is passed as an
+  // all-zero address (addr_mode 0) and src_endpoint 0.
+  bool handled = false;
+  for (auto *v = variables; v != nullptr; v = v->next) {
+    if (v->status != EZB_ZCL_STATUS_SUCCESS || v->attr_value == nullptr)
+      continue;
+    auto attr = this->attributes_.find({info.dst_ep, info.cluster_id, EZB_ZCL_CLUSTER_CLIENT, v->attr_id});
+    if (attr == this->attributes_.end())
+      continue;
+    ESP_LOGD(TAG, "Read attribute response for endpoint %d cluster 0x%04x attribute 0x%04x -> on_report", info.dst_ep,
+             info.cluster_id, v->attr_id);
+    ezb_address_t src{};
+    attr->second->on_report(v->attr_value, v->attr_type, src, 0);
+    handled = true;
+  }
+  if (handled)
+    return;
   ESP_LOGD(TAG, "Attribute data recieved (but not yet handled):");
   while (variables) {
     ESP_LOGD(TAG, "Read attribute response: status(%d), cluster(0x%x), attribute(0x%x), type(0x%x), value(%d)",
