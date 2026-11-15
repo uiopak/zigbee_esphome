@@ -557,7 +557,7 @@ async def add_sdkconfigs(config):
 async def to_code(config):
     add_idf_component(
         name="espressif/esp-zigbee-lib",
-        ref="2.0.5",
+        ref="2.0.4",
     )
 
     add_idf_sdkconfig_option("CONFIG_ZB_ENABLED", True)
