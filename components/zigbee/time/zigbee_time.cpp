@@ -70,28 +70,48 @@ void ZigbeeTime::update() { this->request_coordinator_time_(); }
 // 50 min uptime, 2026-11-19 -7 x 2^32 us at 8 h 54 min (bits 36+ of the
 // 16 MHz count). The damage is precise and repairable:
 //   - ESPHome's scheduler runs on millis_64() = esp_timer, so every
-//     interval and PollingComponent was suddenly due ~k x 71.6 min in the
-//     future and stopped, while millis()/set_timeout users kept working;
+//     interval, PollingComponent and already-pending timeout was suddenly
+//     due ~k x 71.6 min in the future and stopped; timeouts created after
+//     the fault, and millis() users, kept working;
 //   - the wall clock is boot_time + esp_timer, so it jumped back as well.
 // millis() comes from the FreeRTOS tick count, which runs on a different
 // SYSTIMER counter and was unaffected both times. Compare the two every loop
 // and, if esp_timer fell behind, move it forward by exactly what it lost:
 // scheduler and wall clock are then both correct again, nothing reboots.
+#ifdef USE_ESP32
+// Both clocks read within the same millisecond tick. If the loop task is
+// preempted between the two reads, the pair would disagree by the preemption
+// time, and the next loop would "repair" a healthy timer by that much.
+static void sample_clocks(uint32_t &ms, int64_t &us) {
+  for (int i = 0; i < 4; i++) {
+    ms = millis();
+    us = esp_timer_get_time();
+    if (millis() == ms)
+      return;
+  }
+}
+#endif
+
 void ZigbeeTime::check_timer_() {
 #ifdef USE_ESP32
-  const uint32_t now_ms = millis();
-  const int64_t now_us = esp_timer_get_time();
+  uint32_t now_ms;
+  int64_t now_us;
+  sample_clocks(now_ms, now_us);
   if (this->tg_valid_) {
     const int64_t d_tick_ms = (int64_t) (uint32_t) (now_ms - this->tg_ms_);
     const int64_t d_timer_ms = (now_us - this->tg_us_) / 1000;
     const int64_t lag_ms = d_tick_ms - d_timer_ms;  // > 0: esp_timer fell behind
-    // A cleared bit can never take more than the counter held, i.e. the
-    // uptime. Anything bigger is not this fault - do not touch the timer.
-    const bool plausible = lag_ms <= (int64_t) now_ms + 60000;
+    // A cleared bit can never take more than the counter held: esp_timer's
+    // own uptime, i.e. where it was last loop plus the time since. (Not
+    // millis(), which wraps every 49.7 days.) A negative reading is not this
+    // fault either. Anything else - do not touch the timer.
+    const bool plausible = now_us >= 0 && lag_ms <= this->tg_us_ / 1000 + d_tick_ms + 60000;
+    // 2 s: the fault never clears bits below 26 of the 16 MHz count
+    // (esp-idf#19036), so the smallest real loss is 2^26 ticks = 4.2 s.
     if (lag_ms > 2000 && plausible) {
       this->timer_repairs_++;
       // Same bracketing IDF uses for its own counter adjustment after light
-      // sleep: the esp_timer list lock, so no alarm is processed half-way.
+      // sleep. (advance() takes the same spinlock itself; nesting is safe.)
       esp_timer_private_lock();
       esp_timer_private_advance(lag_ms * 1000);
       esp_timer_private_unlock();
@@ -105,8 +125,7 @@ void ZigbeeTime::check_timer_() {
           CLOCK_EVENT_TIMER_REPAIRED,
           (int32_t) std::min<int64_t>(INT32_MAX, lag_ms / 1000));
       // Re-sample both together, after the logging above.
-      this->tg_ms_ = millis();
-      this->tg_us_ = esp_timer_get_time();
+      sample_clocks(this->tg_ms_, this->tg_us_);
       return;
     }
     if (lag_ms > 2000) {
@@ -264,6 +283,8 @@ uint32_t ZigbeeTime::get_utc_time() {
 // whole multiples of 2^32 us. Record the attempt and ignore it.
 void ZigbeeTime::set_utc_time(uint32_t utc) {
   // Zigbee task - hand off to the main loop.
+  if (global_time == nullptr)
+    return;
   global_time->set_epoch_time(utc + EPOCH_2000);
 }
 
