@@ -106,9 +106,12 @@ void ZigbeeTime::check_timer_() {
     // millis(), which wraps every 49.7 days.) A negative reading is not this
     // fault either. Anything else - do not touch the timer.
     const bool plausible = now_us >= 0 && lag_ms <= this->tg_us_ / 1000 + d_tick_ms + 60000;
-    // 2 s: the fault never clears bits below 26 of the 16 MHz count
-    // (esp-idf#19036), so the smallest real loss is 2^26 ticks = 4.2 s.
-    if (lag_ms > 2000 && plausible) {
+    // 500 ms: esp-idf#19036 also documents a 1.049 s loss (bit 24 of the
+    // 16 MHz count), so a multi-second threshold would silently absorb it.
+    // With both clocks read in the same tick the healthy per-loop
+    // difference is a millisecond or two, and the tick can only fall
+    // BEHIND esp_timer (missed tick interrupts), which is the other sign.
+    if (lag_ms > 500 && plausible) {
       this->timer_repairs_++;
       // Same bracketing IDF uses for its own counter adjustment after light
       // sleep. (advance() takes the same spinlock itself; nesting is safe.)
@@ -128,11 +131,15 @@ void ZigbeeTime::check_timer_() {
       sample_clocks(this->tg_ms_, this->tg_us_);
       return;
     }
-    if (lag_ms > 2000) {
+    if (lag_ms > 500) {
       ESP_LOGE(TAG, "esp_timer %" PRId64 " ms behind the tick count, more than the uptime - NOT repairing", lag_ms);
     }
     if (lag_ms < -2000) {
-      ESP_LOGW(TAG, "esp_timer jumped %" PRId64 " ms AHEAD of the tick count (was %" PRId64 " us, previous loop %" PRId64
+      // Either esp_timer gained, or the tick count LOST time (UNIT1 losses
+      // are documented in esp-idf#19036 too, and missed tick interrupts look
+      // the same). Without a third clock we cannot tell which, so: report,
+      // touch nothing.
+      ESP_LOGW(TAG, "esp_timer ran %" PRId64 " ms AHEAD of the tick count (was %" PRId64 " us, previous loop %" PRId64
                " us) - left as is",
                -lag_ms, now_us, this->tg_us_);
       this->clock_event_callback_.call(
