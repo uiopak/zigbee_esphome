@@ -29,6 +29,14 @@ enum ZigbeeClockEvent : uint8_t {
   // 60 s, so loop() asked the coordinator itself. diff = seconds since the
   // previous request.
   CLOCK_EVENT_SYNC_OVERDUE = 4,
+  // esp_timer (the microsecond timer behind ESPHome's scheduler AND the wall
+  // clock) fell behind the FreeRTOS tick count and was advanced back into
+  // line. diff = seconds it had lost.
+  CLOCK_EVENT_TIMER_REPAIRED = 5,
+  // esp_timer jumped AHEAD of the tick count. Not undone (that would stall
+  // every timer scheduled since); the wall clock guard handles the clock.
+  // diff = seconds it gained.
+  CLOCK_EVENT_TIMER_FORWARD = 6,
 };
 
 class ZigbeeTime : public time::RealTimeClock {
@@ -48,8 +56,10 @@ class ZigbeeTime : public time::RealTimeClock {
   }
   uint32_t get_reverted_jumps() const { return this->reverted_jumps_; }
   uint32_t get_ignored_sdk_sets() const { return this->ignored_sdk_sets_; }
+  uint32_t get_timer_repairs() const { return this->timer_repairs_; }
 
  protected:
+  void check_timer_();
   void register_zb_time();
   void request_coordinator_time_();
   void apply_coordinator_epoch_(time_t epoch);
@@ -71,6 +81,12 @@ class ZigbeeTime : public time::RealTimeClock {
   uint32_t last_request_ms_{0};
   uint32_t reverted_jumps_{0};
   uint32_t ignored_sdk_sets_{0};
+  // Timer guard: esp_timer_get_time() and millis() (FreeRTOS ticks, a separate
+  // SYSTIMER counter) sampled together on the previous loop().
+  int64_t tg_us_{0};
+  uint32_t tg_ms_{0};
+  bool tg_valid_{false};
+  uint32_t timer_repairs_{0};
   CallbackManager<void(uint8_t, int32_t)> clock_event_callback_{};
 };
 

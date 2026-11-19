@@ -5,6 +5,11 @@
 #include <cinttypes>
 #include <climits>
 
+#ifdef USE_ESP32
+#include <esp_timer.h>
+#include <esp_private/esp_timer_private.h>
+#endif
+
 namespace esphome {
 namespace zigbee {
 
@@ -57,7 +62,61 @@ void ZigbeeTime::cb(ezb_err_t status) {
 // it directly and apply exactly what it says.
 void ZigbeeTime::update() { this->request_coordinator_time_(); }
 
+// Timer guard. On an ESP32-C6 router esp_timer_get_time() has been seen to
+// lose its upper 32 bits mid-run and STAY there (2026-11-15: -3 x 2^32 us at
+// 3 h 50 min uptime; 2026-11-19: -7 x 2^32 us at 8 h 54 min). Nothing in the
+// firmware writes that counter, so the culprit is still unknown, but the
+// damage is precise and repairable:
+//   - ESPHome's scheduler runs on millis_64() = esp_timer, so every
+//     interval and PollingComponent was suddenly due ~k x 71.6 min in the
+//     future and stopped, while millis()/set_timeout users kept working;
+//   - the wall clock is boot_time + esp_timer, so it jumped back as well.
+// millis() comes from the FreeRTOS tick count, which runs on a different
+// SYSTIMER counter and was unaffected both times. Compare the two every loop
+// and, if esp_timer fell behind, move it forward by exactly what it lost:
+// scheduler and wall clock are then both correct again, nothing reboots.
+void ZigbeeTime::check_timer_() {
+#ifdef USE_ESP32
+  const uint32_t now_ms = millis();
+  const int64_t now_us = esp_timer_get_time();
+  if (this->tg_valid_) {
+    const int64_t d_tick_ms = (int64_t) (uint32_t) (now_ms - this->tg_ms_);
+    const int64_t d_timer_ms = (now_us - this->tg_us_) / 1000;
+    const int64_t lag_ms = d_tick_ms - d_timer_ms;  // > 0: esp_timer fell behind
+    if (lag_ms > 2000) {
+      this->timer_repairs_++;
+      esp_timer_private_advance(lag_ms * 1000);
+      const int64_t fixed_us = esp_timer_get_time();
+      ESP_LOGW(TAG,
+               "esp_timer fell %" PRId64 " ms behind the tick count (%.3f x 2^32 us; was %" PRId64 " us, previous loop "
+               "%" PRId64 " us) - advanced it back to %" PRId64 " us (repair #%" PRIu32 ")",
+               lag_ms, (double) lag_ms * 1000.0 / 4294967296.0, now_us, this->tg_us_, fixed_us,
+               this->timer_repairs_);
+      this->clock_event_callback_.call(
+          CLOCK_EVENT_TIMER_REPAIRED,
+          (int32_t) std::min<int64_t>(INT32_MAX, lag_ms / 1000));
+      this->tg_us_ = fixed_us;
+      this->tg_ms_ = millis();
+      return;
+    }
+    if (lag_ms < -2000) {
+      ESP_LOGW(TAG, "esp_timer jumped %" PRId64 " ms AHEAD of the tick count (was %" PRId64 " us, previous loop %" PRId64
+               " us) - left as is",
+               -lag_ms, now_us, this->tg_us_);
+      this->clock_event_callback_.call(
+          CLOCK_EVENT_TIMER_FORWARD,
+          (int32_t) std::min<int64_t>(INT32_MAX, -lag_ms / 1000));
+    }
+  }
+  this->tg_us_ = now_us;
+  this->tg_ms_ = now_ms;
+  this->tg_valid_ = true;
+#endif
+}
+
 void ZigbeeTime::loop() {
+  // First, before anything below reads the time.
+  this->check_timer_();
   const uint32_t now_ms = millis();
 
   // Backstop for the scheduled sync. update() runs from the PollingComponent
@@ -75,8 +134,9 @@ void ZigbeeTime::loop() {
   // Jump guard. Between coordinator syncs the wall clock must advance exactly
   // as fast as millis(). Anything else is something other than us writing the
   // clock - on 2026-11-15 it went back by exactly 3 x 2^32 us (12885 s) with
-  // no sync anywhere near it, the signature of a 32-bit microsecond counter
-  // wrapping inside the Zigbee stack. Put it back and say so.
+  // no sync anywhere near it. check_timer_() above now catches the known cause
+  // (esp_timer losing its upper bits) first; this stays as the second line of
+  // defence for anything else that moves the wall clock. Put it back and say so.
   if (!this->has_time_ || now_ms - this->guard_checked_ms_ < 1000)
     return;
   this->guard_checked_ms_ = now_ms;
