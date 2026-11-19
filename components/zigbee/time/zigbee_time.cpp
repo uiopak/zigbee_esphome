@@ -62,11 +62,13 @@ void ZigbeeTime::cb(ezb_err_t status) {
 // it directly and apply exactly what it says.
 void ZigbeeTime::update() { this->request_coordinator_time_(); }
 
-// Timer guard. On an ESP32-C6 router esp_timer_get_time() has been seen to
-// lose its upper 32 bits mid-run and STAY there (2026-11-15: -3 x 2^32 us at
-// 3 h 50 min uptime; 2026-11-19: -7 x 2^32 us at 8 h 54 min). Nothing in the
-// firmware writes that counter, so the culprit is still unknown, but the
-// damage is precise and repairable:
+// Timer guard. ESP32-C6 rev v0.2 (seen on Seeed XIAO ESP32-C6 boards): SYSTIMER
+// UNIT0, the counter behind esp_timer, spontaneously clears a group of its
+// bits while the radio is busy and keeps counting from the lower value - a
+// hardware fault, no write path involved. UNIT1 (FreeRTOS tick) is not
+// affected. See espressif/esp-idf#19036. Here: 2026-11-15 -3 x 2^32 us at 3 h
+// 50 min uptime, 2026-11-19 -7 x 2^32 us at 8 h 54 min (bits 36+ of the
+// 16 MHz count). The damage is precise and repairable:
 //   - ESPHome's scheduler runs on millis_64() = esp_timer, so every
 //     interval and PollingComponent was suddenly due ~k x 71.6 min in the
 //     future and stopped, while millis()/set_timeout users kept working;
@@ -83,21 +85,32 @@ void ZigbeeTime::check_timer_() {
     const int64_t d_tick_ms = (int64_t) (uint32_t) (now_ms - this->tg_ms_);
     const int64_t d_timer_ms = (now_us - this->tg_us_) / 1000;
     const int64_t lag_ms = d_tick_ms - d_timer_ms;  // > 0: esp_timer fell behind
-    if (lag_ms > 2000) {
+    // A cleared bit can never take more than the counter held, i.e. the
+    // uptime. Anything bigger is not this fault - do not touch the timer.
+    const bool plausible = lag_ms <= (int64_t) now_ms + 60000;
+    if (lag_ms > 2000 && plausible) {
       this->timer_repairs_++;
+      // Same bracketing IDF uses for its own counter adjustment after light
+      // sleep: the esp_timer list lock, so no alarm is processed half-way.
+      esp_timer_private_lock();
       esp_timer_private_advance(lag_ms * 1000);
+      esp_timer_private_unlock();
       const int64_t fixed_us = esp_timer_get_time();
       ESP_LOGW(TAG,
                "esp_timer fell %" PRId64 " ms behind the tick count (%.3f x 2^32 us; was %" PRId64 " us, previous loop "
-               "%" PRId64 " us) - advanced it back to %" PRId64 " us (repair #%" PRIu32 ")",
+               "%" PRId64 " us) - advanced it back to %" PRId64 " us (repair #%" PRIu32 ", esp-idf#19036)",
                lag_ms, (double) lag_ms * 1000.0 / 4294967296.0, now_us, this->tg_us_, fixed_us,
                this->timer_repairs_);
       this->clock_event_callback_.call(
           CLOCK_EVENT_TIMER_REPAIRED,
           (int32_t) std::min<int64_t>(INT32_MAX, lag_ms / 1000));
-      this->tg_us_ = fixed_us;
+      // Re-sample both together, after the logging above.
       this->tg_ms_ = millis();
+      this->tg_us_ = esp_timer_get_time();
       return;
+    }
+    if (lag_ms > 2000) {
+      ESP_LOGE(TAG, "esp_timer %" PRId64 " ms behind the tick count, more than the uptime - NOT repairing", lag_ms);
     }
     if (lag_ms < -2000) {
       ESP_LOGW(TAG, "esp_timer jumped %" PRId64 " ms AHEAD of the tick count (was %" PRId64 " us, previous loop %" PRId64
@@ -187,7 +200,8 @@ void ZigbeeTime::request_coordinator_time_() {
   ezb_err_t ret = ezb_zcl_read_attr_cmd_req(&cmd);
   esp_zigbee_lock_release();
   if (ret != EZB_ERR_NONE) {
-    ESP_LOGW(TAG, "Time read request failed: %d", ret);
+    ESP_LOGW(TAG, "Time read request failed: %d, retrying in 60 s", ret);
+    this->set_timeout("zb_time_retry", 60000, [this]() { this->request_coordinator_time_(); });
     return;
   }
   ESP_LOGD(TAG, "Requested time from coordinator");
@@ -232,7 +246,17 @@ void ZigbeeTime::apply_coordinator_epoch_(time_t epoch) {
   }
 }
 
-uint32_t ZigbeeTime::get_utc_time() { return (uint32_t) (global_time->timestamp_now() - EPOCH_2000); }
+// Answer other devices' genTime reads. Before the first coordinator sync the
+// clock is at 1970, and 1970 - 2000 wraps to year ~2106; ZCL's "invalid" is
+// 0xFFFFFFFF.
+uint32_t ZigbeeTime::get_utc_time() {
+  if (global_time == nullptr || !global_time->has_time_)
+    return 0xFFFFFFFF;
+  const time_t now = global_time->timestamp_now();
+  if (now < EPOCH_2000)
+    return 0xFFFFFFFF;
+  return (uint32_t) (now - EPOCH_2000);
+}
 
 // The SDK calls this through the Time server interface. It is NOT trusted:
 // the only clock source this component accepts is its own read of the

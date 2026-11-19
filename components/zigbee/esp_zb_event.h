@@ -40,13 +40,24 @@ class ZBEvent {
           this->event_.set_attr.attribute.data.value = nullptr;
         }
         break;
-      case EZB_ZCL_CORE_REPORT_ATTR_CB_ID:
-        if (this->event_.report_attr.variables.attr_value != nullptr &&
-            this->event_.report_attr.variables.attr_value != this->event_.report_attr.inline_data) {
-          free(this->event_.report_attr.variables.attr_value);
-          this->event_.report_attr.variables.attr_value = nullptr;
+      case EZB_ZCL_CORE_REPORT_ATTR_CB_ID: {
+        ezb_zcl_report_attr_variable_t *head = &(this->event_.report_attr.variables);
+        if (head->attr_value != nullptr && head->attr_value != this->event_.report_attr.inline_data) {
+          free(head->attr_value);
+        }
+        head->attr_value = nullptr;
+        // Multi-attribute reports: the extra nodes were allocated with new +
+        // malloc in init_report_attr_data and used to leak on every release.
+        ezb_zcl_report_attr_variable_t *var = head->next;
+        head->next = nullptr;
+        while (var != nullptr) {
+          ezb_zcl_report_attr_variable_t *next = var->next;
+          free(var->attr_value);
+          delete var;
+          var = next;
         }
         break;
+      }
       case EZB_ZCL_CORE_READ_ATTR_RSP_CB_ID: {
         ezb_zcl_read_attr_rsp_variable_t *head = &(this->event_.read_attr_resp.variables);
         if (head->attr_value != nullptr && head->attr_value != this->event_.read_attr_resp.inline_data) {
@@ -146,6 +157,7 @@ class ZBEvent {
     // `while (variables) { ... variables = variables->next; }` dereferences
     // freed memory on the second iteration (load access fault).
     this->event_.report_attr.variables.next = nullptr;
+    this->event_.report_attr.variables.attr_value = nullptr;
     this->event_.report_attr.dst_endpoint = message->in.header->dst_ep;
     this->event_.report_attr.cluster = message->in.header->cluster_id;
     this->event_.report_attr.variables.attr_id = message->in.variables->attr_id;
